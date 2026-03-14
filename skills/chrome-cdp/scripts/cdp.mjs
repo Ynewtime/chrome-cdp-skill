@@ -7,9 +7,9 @@
 // the CDP session open. Chrome's "Allow debugging" modal fires once per
 // daemon (= once per tab). Daemons auto-exit after 20min idle.
 
-import { readFileSync, writeFileSync, unlinkSync, existsSync, readdirSync } from 'fs';
-import { homedir } from 'os';
-import { resolve } from 'path';
+import { readFileSync, writeFileSync, unlinkSync, existsSync, readdirSync, mkdirSync } from 'fs';
+import { homedir, tmpdir } from 'os';
+import { resolve, join } from 'path';
 import { fileURLToPath } from 'url';
 import { spawn } from 'child_process';
 import net from 'net';
@@ -20,8 +20,15 @@ const IDLE_TIMEOUT = 20 * 60 * 1000;
 const DAEMON_CONNECT_RETRIES = 20;
 const DAEMON_CONNECT_DELAY = 300;
 const MIN_TARGET_PREFIX_LEN = 8;
-const SOCK_PREFIX = '/tmp/cdp-';
-const PAGES_CACHE = '/tmp/cdp-pages.json';
+const IS_WIN = process.platform === 'win32';
+const IS_WSL = !IS_WIN && (() => {
+  try { return readFileSync('/proc/version', 'utf8').toLowerCase().includes('microsoft'); }
+  catch { return false; }
+})();
+const TEMP_DIR = IS_WIN ? join(tmpdir(), 'cdp-agent') : tmpdir();
+if (IS_WIN) { try { mkdirSync(TEMP_DIR, { recursive: true }); } catch {} }
+const PAGES_CACHE = join(TEMP_DIR, 'cdp-pages.json');
+const DEFAULT_SCREENSHOT = join(TEMP_DIR, 'screenshot.png');
 
 const WSL_SYSTEM_USERS = new Set(['All Users', 'Default', 'Default User', 'Public', 'desktop.ini']);
 
@@ -30,6 +37,15 @@ export function getCandidatePaths({ platform, homeDir, procVersion, wslUsers }) 
     resolve(homeDir, 'Library/Application Support/Google/Chrome/DevToolsActivePort'),
     resolve(homeDir, '.config/google-chrome/DevToolsActivePort'),
   ];
+  // Windows: check common Chrome user data locations
+  if (platform === 'win32') {
+    const localAppData = process.env.LOCALAPPDATA || resolve(homeDir, 'AppData/Local');
+    candidates.unshift(
+      resolve(localAppData, 'Google/Chrome/User Data/DevToolsActivePort'),
+      resolve(localAppData, 'Google/Chrome SxS/User Data/DevToolsActivePort'),
+    );
+  }
+  // WSL: Chrome runs on Windows, access via /mnt/c/
   if (platform === 'linux' && procVersion && /microsoft|wsl/i.test(procVersion)) {
     for (const user of wslUsers) {
       if (WSL_SYSTEM_USERS.has(user)) continue;
@@ -45,7 +61,12 @@ export function parseSnapCompact(args) {
   return (args || []).includes('--compact');
 }
 
-function sockPath(targetId) { return `${SOCK_PREFIX}${targetId}.sock`; }
+function sockPath(targetId) {
+  if (IS_WIN) return `\\\\.\\pipe\\cdp-${targetId}`;
+  return join(TEMP_DIR, `cdp-${targetId}.sock`);
+}
+// On Windows, named pipes can't be listed, so we use marker files
+function markerPath(targetId) { return join(TEMP_DIR, `cdp-${targetId}.marker`); }
 
 function getWsUrl() {
   let procVersion = null;
@@ -71,12 +92,16 @@ function getWsUrl() {
 const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 
 function listDaemonSockets() {
-  return readdirSync('/tmp')
-    .filter(f => f.startsWith('cdp-') && f.endsWith('.sock'))
-    .map(f => ({
-      targetId: f.slice(4, -5),
-      socketPath: `/tmp/${f}`,
-    }));
+  const dir = IS_WIN ? TEMP_DIR : TEMP_DIR;
+  const ext = IS_WIN ? '.marker' : '.sock';
+  try {
+    return readdirSync(dir)
+      .filter(f => f.startsWith('cdp-') && f.endsWith(ext))
+      .map(f => ({
+        targetId: f.slice(4, -ext.length),
+        socketPath: IS_WIN ? `\\\\.\\pipe\\cdp-${f.slice(4, -ext.length)}` : join(dir, f),
+      }));
+  } catch { return []; }
 }
 
 function resolvePrefix(prefix, candidates, noun = 'target', missingHint = '') {
@@ -315,7 +340,7 @@ async function shotStr(cdp, sid, filePath) {
   }
 
   const { data } = await cdp.send('Page.captureScreenshot', { format: 'png' }, sid);
-  const out = filePath || '/tmp/screenshot.png';
+  const out = filePath || DEFAULT_SCREENSHOT;
   writeFileSync(out, Buffer.from(data, 'base64'));
 
   const lines = [out];
@@ -489,6 +514,10 @@ async function runDaemon(targetId) {
     process.exit(1);
   }
 
+  // Create marker file for daemon discovery (needed on Windows, harmless on Unix)
+  const mp = markerPath(targetId);
+  writeFileSync(mp, String(process.pid));
+
   // Shutdown helpers
   let alive = true;
   function shutdown() {
@@ -496,6 +525,7 @@ async function runDaemon(targetId) {
     alive = false;
     server.close();
     try { unlinkSync(sp); } catch {}
+    try { unlinkSync(mp); } catch {}
     cdp.close();
     process.exit(0);
   }
@@ -583,7 +613,7 @@ async function runDaemon(targetId) {
     });
   });
 
-  try { unlinkSync(sp); } catch {}
+  if (!IS_WIN) { try { unlinkSync(sp); } catch {} }
   server.listen(sp);
 }
 
@@ -604,13 +634,15 @@ async function getOrStartTabDaemon(targetId) {
   // Try existing daemon
   try { return await connectToSocket(sp); } catch {}
 
-  // Clean stale socket
-  try { unlinkSync(sp); } catch {}
+  // Clean stale socket/marker
+  if (!IS_WIN) { try { unlinkSync(sp); } catch {} }
+  try { unlinkSync(markerPath(targetId)); } catch {}
 
   // Spawn daemon
   const child = spawn(process.execPath, [process.argv[1], '_daemon', targetId], {
     detached: true,
     stdio: 'ignore',
+    ...(IS_WIN ? { windowsHide: true } : {}),
   });
   child.unref();
 
