@@ -10,6 +10,7 @@
 import { readFileSync, writeFileSync, unlinkSync, existsSync, readdirSync } from 'fs';
 import { homedir } from 'os';
 import { resolve } from 'path';
+import { fileURLToPath } from 'url';
 import { spawn } from 'child_process';
 import net from 'net';
 
@@ -22,13 +23,45 @@ const MIN_TARGET_PREFIX_LEN = 8;
 const SOCK_PREFIX = '/tmp/cdp-';
 const PAGES_CACHE = '/tmp/cdp-pages.json';
 
+const WSL_SYSTEM_USERS = new Set(['All Users', 'Default', 'Default User', 'Public', 'desktop.ini']);
+
+export function getCandidatePaths({ platform, homeDir, procVersion, wslUsers }) {
+  const candidates = [
+    resolve(homeDir, 'Library/Application Support/Google/Chrome/DevToolsActivePort'),
+    resolve(homeDir, '.config/google-chrome/DevToolsActivePort'),
+  ];
+  if (platform === 'linux' && procVersion && /microsoft|wsl/i.test(procVersion)) {
+    for (const user of wslUsers) {
+      if (WSL_SYSTEM_USERS.has(user)) continue;
+      candidates.push(
+        resolve('/mnt/c/Users', user, 'AppData/Local/Google/Chrome/User Data/DevToolsActivePort')
+      );
+    }
+  }
+  return candidates;
+}
+
+export function parseSnapCompact(args) {
+  return (args || []).includes('--compact');
+}
+
 function sockPath(targetId) { return `${SOCK_PREFIX}${targetId}.sock`; }
 
 function getWsUrl() {
-  const candidates = [
-    resolve(homedir(), 'Library/Application Support/Google/Chrome/DevToolsActivePort'),
-    resolve(homedir(), '.config/google-chrome/DevToolsActivePort'),
-  ];
+  let procVersion = null;
+  let wslUsers = [];
+  if (process.platform === 'linux') {
+    try { procVersion = readFileSync('/proc/version', 'utf8'); } catch {}
+    if (procVersion && /microsoft|wsl/i.test(procVersion)) {
+      try { wslUsers = readdirSync('/mnt/c/Users'); } catch {}
+    }
+  }
+  const candidates = getCandidatePaths({
+    platform: process.platform,
+    homeDir: homedir(),
+    procVersion,
+    wslUsers,
+  });
   const portFile = candidates.find(path => existsSync(path));
   if (!portFile) throw new Error(`Could not find DevToolsActivePort file in: ${candidates.join(', ')}`);
   const lines = readFileSync(portFile, 'utf8').trim().split('\n');
@@ -79,10 +112,12 @@ class CDP {
   async connect(wsUrl) {
     return new Promise((res, rej) => {
       this.#ws = new WebSocket(wsUrl);
-      this.#ws.onopen = () => res();
-      this.#ws.onerror = (e) => rej(new Error('WebSocket error: ' + (e.message || e.type)));
-      this.#ws.onclose = () => this.#closeHandlers.forEach(h => h());
-      this.#ws.onmessage = (ev) => {
+      // Node 24's built-in WebSocket requires addEventListener —
+      // property assignment (ws.onopen, ws.onmessage, etc.) silently fails.
+      this.#ws.addEventListener('open', () => res());
+      this.#ws.addEventListener('error', (e) => rej(new Error('WebSocket error: ' + (e.message || e.type))));
+      this.#ws.addEventListener('close', () => this.#closeHandlers.forEach(h => h()));
+      this.#ws.addEventListener('message', (ev) => {
         const msg = JSON.parse(ev.data);
         if (msg.id && this.#pending.has(msg.id)) {
           const { resolve, reject } = this.#pending.get(msg.id);
@@ -94,7 +129,7 @@ class CDP {
             handler(msg.params || {}, msg);
           }
         }
-      };
+      });
     });
   }
 
@@ -164,7 +199,9 @@ class CDP {
 
 async function getPages(cdp) {
   const { targetInfos } = await cdp.send('Target.getTargets');
-  return targetInfos.filter(t => t.type === 'page' && !t.url.startsWith('chrome://'));
+  const allPages = targetInfos.filter(t => t.type === 'page');
+  const pages = allPages.filter(p => !p.url.startsWith('chrome://'));
+  return { pages, hiddenCount: allPages.length - pages.length };
 }
 
 function formatPageList(pages) {
@@ -488,16 +525,16 @@ async function runDaemon(targetId) {
       let result;
       switch (cmd) {
         case 'list': {
-          const pages = await getPages(cdp);
+          const { pages } = await getPages(cdp);
           result = formatPageList(pages);
           break;
         }
         case 'list_raw': {
-          const pages = await getPages(cdp);
+          const { pages } = await getPages(cdp);
           result = JSON.stringify(pages);
           break;
         }
-        case 'snap': case 'snapshot': result = await snapshotStr(cdp, sessionId, true); break;
+        case 'snap': case 'snapshot': result = await snapshotStr(cdp, sessionId, parseSnapCompact(args)); break;
         case 'eval': result = await evalStr(cdp, sessionId, args[0]); break;
         case 'shot': case 'screenshot': result = await shotStr(cdp, sessionId, args[0]); break;
         case 'html': result = await htmlStr(cdp, sessionId, args[0]); break;
@@ -745,6 +782,7 @@ async function main() {
   // List — use existing daemon if available, otherwise direct
   if (cmd === 'list' || cmd === 'ls') {
     let pages;
+    let hiddenCount = 0;
     const existingSock = findAnyDaemonSocket();
     if (existingSock) {
       try {
@@ -757,13 +795,16 @@ async function main() {
       // No daemon running — connect directly (will trigger one Allow)
       const cdp = new CDP();
       await cdp.connect(getWsUrl());
-      pages = await getPages(cdp);
+      ({ pages, hiddenCount } = await getPages(cdp));
       cdp.close();
     }
     writeFileSync(PAGES_CACHE, JSON.stringify(pages));
-    console.log(formatPageList(pages));
-    setTimeout(() => process.exit(0), 100);
-    return;
+    let output = formatPageList(pages);
+    if (hiddenCount > 0) {
+      output += `\n\n(${hiddenCount} chrome:// page(s) hidden)`;
+    }
+    console.log(output);
+    process.exit(0);
   }
 
   // Stop
@@ -835,4 +876,8 @@ async function main() {
   }
 }
 
-main().catch(e => { console.error(e.message); process.exit(1); });
+// Guard: only run CLI when executed directly, not when imported by tests
+const isDirectRun = process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url);
+if (isDirectRun) {
+  main().catch(e => { console.error(e.message); process.exit(1); });
+}
