@@ -1,7 +1,7 @@
-#!/usr/bin/env node
+#!/usr/bin/env bun
 // cdp - lightweight Chrome DevTools Protocol CLI
 // Uses raw CDP over WebSocket, no Puppeteer dependency.
-// Requires Node 22+ (built-in WebSocket).
+// Requires Bun (or Node 22+ with built-in WebSocket).
 //
 // Per-tab persistent daemon: page commands go through a daemon that holds
 // the CDP session open. Chrome's "Allow debugging" modal fires once per

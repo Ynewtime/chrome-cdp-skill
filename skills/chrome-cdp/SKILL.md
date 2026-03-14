@@ -10,7 +10,7 @@ Lightweight Chrome DevTools Protocol CLI. Connects directly via WebSocket — no
 ## Prerequisites
 
 - Chrome with remote debugging enabled: open `chrome://inspect/#remote-debugging` and toggle the switch
-- Node.js 22+ (uses built-in WebSocket)
+- Bun (or Node.js 22+)
 
 ## Commands
 
