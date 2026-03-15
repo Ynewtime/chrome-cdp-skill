@@ -8,7 +8,6 @@
 // daemon (= once per tab). Daemons auto-exit after 20min idle.
 
 import { readFileSync, writeFileSync, unlinkSync, existsSync, readdirSync, mkdirSync } from 'fs';
-import { randomBytes } from 'crypto';
 import { homedir } from 'os';
 import { resolve } from 'path';
 import { spawn } from 'child_process';
@@ -21,13 +20,12 @@ const DAEMON_CONNECT_RETRIES = 20;
 const DAEMON_CONNECT_DELAY = 300;
 const MIN_TARGET_PREFIX_LEN = 8;
 process.umask(0o077);
-const RUNTIME_DIR = resolve(homedir(), '.cache', 'cdp');
+const RUNTIME_DIR = process.env.XDG_RUNTIME_DIR
+  ? resolve(process.env.XDG_RUNTIME_DIR, 'cdp')
+  : resolve(homedir(), '.cache', 'cdp');
 try { mkdirSync(RUNTIME_DIR, { recursive: true, mode: 0o700 }); } catch {}
 const SOCK_PREFIX = resolve(RUNTIME_DIR, 'cdp-');
 const PAGES_CACHE = resolve(RUNTIME_DIR, 'pages.json');
-function defaultScreenshotPath() {
-  return resolve(RUNTIME_DIR, `screenshot-${Date.now()}-${randomBytes(4).toString('hex')}.png`);
-}
 
 function sockPath(targetId) { return `${SOCK_PREFIX}${targetId}.sock`; }
 
@@ -283,7 +281,7 @@ async function evalStr(cdp, sid, expression) {
   return typeof val === 'object' ? JSON.stringify(val, null, 2) : String(val ?? '');
 }
 
-async function shotStr(cdp, sid, filePath) {
+async function shotStr(cdp, sid, filePath, targetId) {
   // Get device scale factor so we can report coordinate mapping
   let dpr = 1;
   try {
@@ -307,7 +305,7 @@ async function shotStr(cdp, sid, filePath) {
   }
 
   const { data } = await cdp.send('Page.captureScreenshot', { format: 'png' }, sid);
-  const out = filePath || defaultScreenshotPath();
+  const out = filePath || resolve(RUNTIME_DIR, `screenshot-${(targetId || 'unknown').slice(0, 8)}.png`);
   writeFileSync(out, Buffer.from(data, 'base64'));
 
   const lines = [out];
@@ -536,7 +534,7 @@ async function runDaemon(targetId) {
         }
         case 'snap': case 'snapshot': result = await snapshotStr(cdp, sessionId, true); break;
         case 'eval': result = await evalStr(cdp, sessionId, args[0]); break;
-        case 'shot': case 'screenshot': result = await shotStr(cdp, sessionId, args[0]); break;
+        case 'shot': case 'screenshot': result = await shotStr(cdp, sessionId, args[0], targetId); break;
         case 'html': result = await htmlStr(cdp, sessionId, args[0]); break;
         case 'nav': case 'navigate': result = await navStr(cdp, sessionId, args[0]); break;
         case 'net': case 'network': result = await netStr(cdp, sessionId); break;
@@ -719,7 +717,7 @@ Usage: cdp <command> [args]
   list                              List open pages (shows unique target prefixes)
   snap  <target>                    Accessibility tree snapshot
   eval  <target> <expr>             Evaluate JS expression
-  shot  <target> [file]             Screenshot (default: ~/.cache/cdp/screenshot-*.png); prints coordinate mapping
+  shot  <target> [file]             Screenshot (default: screenshot-<target>.png in runtime dir); prints coordinate mapping
   html  <target> [selector]         Get HTML (full page or CSS selector)
   nav   <target> <url>              Navigate to URL and wait for load completion
   net   <target>                    Network performance entries
@@ -754,7 +752,7 @@ EVAL SAFETY NOTE
   collect all data in a single eval.
 
 DAEMON IPC (for advanced use / scripting)
-  Each tab runs a persistent daemon at Unix socket: ~/.cache/cdp/cdp-<fullTargetId>.sock
+  Each tab runs a persistent daemon at Unix socket in the runtime dir (see below).
   Protocol: newline-delimited JSON (one JSON object per line, UTF-8).
     Request:  {"id":<number>, "cmd":"<command>", "args":["arg1","arg2",...]}
     Response: {"id":<number>, "ok":true,  "result":"<string>"}
