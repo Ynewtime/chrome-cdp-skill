@@ -1,5 +1,7 @@
 # chrome-cdp
 
+> **Deprecated**: This repo has been merged into [Ynewtime/dotai](https://github.com/Ynewtime/dotai). Future updates will be published there. See [skills/chrome-cdp](https://github.com/Ynewtime/dotai/tree/main/skills/chrome-cdp) for the latest version.
+
 Let your AI agent see and interact with your **live Chrome session** — the tabs you already have open, your logged-in accounts, your current page state. No browser automation framework, no separate browser instance, no re-login.
 
 Works out of the box with any Chrome installation. One toggle to enable, nothing else to install.
