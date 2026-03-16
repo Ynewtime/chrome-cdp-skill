@@ -126,10 +126,12 @@ class CDP {
   async connect(wsUrl) {
     return new Promise((res, rej) => {
       this.#ws = new WebSocket(wsUrl);
-      this.#ws.onopen = () => res();
-      this.#ws.onerror = (e) => rej(new Error('WebSocket error: ' + (e.message || e.type)));
-      this.#ws.onclose = () => this.#closeHandlers.forEach(h => h());
-      this.#ws.onmessage = (ev) => {
+      // Node 24's built-in WebSocket requires addEventListener —
+      // property assignment (ws.onopen, ws.onmessage, etc.) silently fails.
+      this.#ws.addEventListener('open', () => res());
+      this.#ws.addEventListener('error', (e) => rej(new Error('WebSocket error: ' + (e.message || e.type))));
+      this.#ws.addEventListener('close', () => this.#closeHandlers.forEach(h => h()));
+      this.#ws.addEventListener('message', (ev) => {
         const msg = JSON.parse(ev.data);
         if (msg.id && this.#pending.has(msg.id)) {
           const { resolve, reject } = this.#pending.get(msg.id);
