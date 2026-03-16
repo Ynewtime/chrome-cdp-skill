@@ -30,11 +30,13 @@ Clone or copy the `skills/chrome-cdp/` directory wherever your agent loads skill
 
 Navigate to `chrome://inspect/#remote-debugging` and toggle the switch. That's it.
 
+The CLI auto-detects Chrome, Chromium, Brave, Edge, and Vivaldi on macOS and Linux. If your browser stores `DevToolsActivePort` in a non-standard location, set the `CDP_PORT_FILE` environment variable to the full path.
+
 ## Usage
 
 ```bash
 scripts/cdp.mjs list                              # list open tabs
-scripts/cdp.mjs shot   <target>                   # screenshot → /tmp/screenshot.png
+scripts/cdp.mjs shot   <target>                   # screenshot → runtime dir
 scripts/cdp.mjs snap   <target>                   # accessibility tree (compact, semantic)
 scripts/cdp.mjs html   <target> [".selector"]     # full HTML or scoped to CSS selector
 scripts/cdp.mjs eval   <target> "expression"      # evaluate JS in page context
@@ -45,6 +47,7 @@ scripts/cdp.mjs clickxy <target> <x> <y>          # click at CSS pixel coordinat
 scripts/cdp.mjs type   <target> "text"            # type at focused element (works in cross-origin iframes)
 scripts/cdp.mjs loadall <target> "selector"       # click "load more" until gone
 scripts/cdp.mjs evalraw <target> <method> [json]  # raw CDP command passthrough
+scripts/cdp.mjs open   [url]                      # open new tab (triggers Allow prompt)
 scripts/cdp.mjs stop   [target]                   # stop daemon(s)
 ```
 
